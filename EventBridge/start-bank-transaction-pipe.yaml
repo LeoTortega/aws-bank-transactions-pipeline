@@ -1,0 +1,21 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for EventBridge Rulestart-bank-transaction-pipe
+Resources:
+  Rule42cfde7c:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: start-bank-transaction-pipe
+      EventPattern: >-
+        {"source":["aws.s3"],"detail-type":["Object
+        Created"],"detail":{"bucket":{"name":["tortega-personal"]},"object":{"key":[{"prefix":"raw/"}]}}}
+      State: ENABLED
+      EventBusName: default
+      Targets:
+        - Id: Id3d112079-f0cf-423f-a84b-a18521073c91
+          Arn:
+            Fn::Sub: >-
+              arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:pipeline-bank-transactions
+          RoleArn:
+            Fn::Sub: >-
+              arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSGlueServiceRole
+Parameters: {}

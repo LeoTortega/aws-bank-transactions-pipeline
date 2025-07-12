@@ -1,0 +1,32 @@
+{
+    "Comment": "Step Function que executa o Glue Job bank_transaction_ing e notifica o resultado para uma Lambda, seja sucesso ou falha.",
+    "StartAt": "ExecutarGlueJob",
+    "States": {
+      "ExecutarGlueJob": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::glue:startJobRun.sync",
+        "Parameters": {
+          "JobName": "bank_transaction_ing"
+        },
+        "Next": "NotificarEngenheiro",
+        "Catch": [
+          {
+            "ErrorEquals": [
+              "States.ALL"
+            ],
+            "ResultPath": "$.errorInfo",
+            "Next": "NotificarEngenheiro"
+          }
+        ]
+      },
+      "NotificarEngenheiro": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": {
+          "FunctionName": "notifica-engenheiro",
+          "Payload.$": "$"
+        },
+        "End": true
+      }
+    }
+  }

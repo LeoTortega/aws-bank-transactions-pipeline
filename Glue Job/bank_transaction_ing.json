@@ -1,0 +1,53 @@
+{
+	"jobConfig": {
+		"name": "bank_transaction_ing",
+		"description": "",
+		"role": "arn:aws:iam::850502433830:role/AWSGlueServiceRole",
+		"command": "glueetl",
+		"version": "5.0",
+		"runtime": null,
+		"workerType": "G.1X",
+		"numberOfWorkers": 2,
+		"maxCapacity": 2,
+		"jobRunQueuingEnabled": false,
+		"maxRetries": 0,
+		"timeout": 15,
+		"maxConcurrentRuns": 1,
+		"security": "none",
+		"scriptName": "bank_transaction_ing.py",
+		"scriptLocation": "s3://tortega-personal/glue-jobs/bank-transactions-ing/scripts/",
+		"language": "python-3",
+		"spark": false,
+		"sparkConfiguration": "standard",
+		"jobParameters": [
+			{
+				"key": "--origin_location_s3",
+				"value": "s3://tortega-personal/raw/",
+				"existing": false
+			},
+			{
+				"key": "--table_location_s3",
+				"value": "s3://tortega-personal/trusted/",
+				"existing": false
+			}
+		],
+		"tags": [],
+		"jobMode": "DEVELOPER_MODE",
+		"createdOn": "2025-07-12T18:42:14.898Z",
+		"developerMode": true,
+		"connectionsList": [],
+		"temporaryDirectory": "s3://tortega-personal/glue-jobs/bank-transactions-ing/temp/",
+		"glueHiveMetastore": true,
+		"etlAutoTuning": false,
+		"metrics": true,
+		"bookmark": "job-bookmark-disable",
+		"sparkPath": "s3://aws-glue-assets-850502433830-us-east-1/sparkHistoryLogs/",
+		"flexExecution": false,
+		"minFlexWorkers": null,
+		"maintenanceWindow": null,
+		"logging": false
+	},
+	"hasBeenSaved": false,
+	"usageProfileName": null,
+	"script": "import sys\nfrom awsglue.transforms import *\nfrom awsglue.utils import getResolvedOptions\nfrom pyspark.context import SparkContext\nfrom awsglue.context import GlueContext\nfrom awsglue.job import Job\n\nimport boto3\nfrom botocore.exceptions import ClientError\nfrom pyspark.sql.functions import to_date, date_format, col\nfrom pyspark.sql import DataFrame # Para type hinting em métodos\n\n## @params: [JOB_NAME]\nargs = getResolvedOptions(sys.argv, ['JOB_NAME', 'origin_location_s3', 'table_location_s3'])\n\norigin_bucket = args['origin_location_s3']\ntable_bucket = args['table_location_s3']\n\nsc = SparkContext()\nglueContext = GlueContext(sc)\nspark = glueContext.spark_session\njob = Job(glueContext)\njob.init(args['JOB_NAME'], args)\ns3 = boto3.client('s3')\n\nspark.conf.set(\"spark.sql.sources.partitionOverwriteMode\", \"dynamic\")\nspark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n\n#######################\n###     Métodos     ###\n#######################\n\ndef max_object(bucket_name: str, s3) -> int:\n    parts = bucket_name.split('//')[1].split('/', 1) # Divide em nome do bucket e o resto como prefixo\n    bucket_name_only = parts[0]\n    prefix = parts[1] if len(parts) > 1 else '' # O prefixo pode ser vazio se o path for só o bucket\n    print(\"Verificando se ja existem dados no bucket\")\n    try:\n        # Tenta listar apenas um objeto (max_keys=1) para verificar a existência de qualquer coisa\n        response = s3.list_objects_v2(Bucket=bucket_name_only, MaxKeys=1)\n\n        # Se 'Contents' não existir ou estiver vazio, o bucket está vazio\n        if 'Contents' not in response or not response['Contents']:\n            print(\"Bucket não está vazio\")\n            return 0\n        else:\n            print(\"Bucket está vazio\")\n            return 1\n    except ClientError as e:\n        # Se ocorrer um erro, imprime e retorna -1\n        error_code = e.response.get(\"Error\", {}).get(\"Code\")\n        if error_code == \"NoSuchBucket\":\n            print(f\"Erro: O bucket '{bucket_name}' não existe.\")\n        elif error_code == \"AccessDenied\":\n            print(f\"Erro: Acesso negado ao bucket '{bucket_name}'. Verifique as permissões IAM.\")\n        else:\n            print(f\"Ocorreu um erro inesperado ao acessar o bucket '{bucket_name}': {e}\")\n        return -1\n    except Exception as e:\n        print(f\"Ocorreu um erro genérico: {e}\")\n        return -1\n\ndef create_table_ddl(spark_df: DataFrame) -> str:\n    pandas_df_sample = spark_df.limit(1).toPandas()\n    \n    schema_parts = []\n    for column_name, dtype in pandas_df_sample.dtypes.items():\n\n        dtype_str = str(dtype)\n        sql_type = 'STRING' \n\n        if 'int' in dtype_str:\n            sql_type = 'BIGINT'\n        elif 'float' in dtype_str:\n            sql_type = 'DOUBLE'\n        elif 'bool' in dtype_str:\n            sql_type = 'BOOLEAN'\n        elif 'datetime' in dtype_str:\n            sql_type = 'TIMESTAMP' \n        elif dtype_str == 'string': \n            sql_type = 'STRING'\n        elif dtype_str == 'object':\n            sql_type = 'STRING'\n        \n        schema_parts.append(f\"`{column_name}` {sql_type}\")\n    \n    table_ddl_columns = \",\\n\".join(schema_parts)\n    return table_ddl_columns\n    \ndef create_table(table_ddl: str, location: str, spark):\n    query = f\"\"\"CREATE EXTERNAL TABLE IF NOT EXISTS db_trusted.bank_transaction(\n                {table_ddl}\n            )\n            PARTITIONED BY (\n                `anomesdia` string\n            )\n            STORED AS PARQUET\n            LOCATION '{location}'\n            TBLPROPERTIES (\n            'classification'='parquet',\n            'projection.enabled'='true',\n            'projection.anomesdia.type'='DATE', -- Supondo que anomesdia seja derivado de uma DATE\n            'projection.anomesdia.range'='20240101,NOW', -- Ajuste conforme o range real de dados\n            'projection.anomesdia.format'='yyyyMMdd', -- Formato da partição na pasta S3\n            'projection.anomesdia.interval'='1',\n            'projection.anomesdia.interval.unit'='DAYS'\n        );\n            \"\"\"\n    print(\"Executando a seguinte query para criação da tabela: \\n\" + query)\n    spark.sql(query)\n    print(\"Tabela db_trusted.bank_transaction criada com sucesso\")\n\ndef read_csv_s3(origin_bucket, spark):\n    print(f\"Lendo arquivos CSV de: {origin_bucket}\")\n    df = spark.read.csv(\n        origin_bucket,\n        header=True,\n        inferSchema=True,\n        sep=\",\",\n        quote='\"',\n        multiLine=False # Defina como True se seus campos puderem ter quebras de linha\n    )\n    print(f\"DataFrame Spark criado com {df.count()} linhas e {len(df.columns)} colunas.\")\n    df.printSchema()\n    \n    return df\n\ndef transform_df(df: DataFrame) -> DataFrame:\n    print(\"Convertendo 'TransactionDate' para o tipo DATE...\")\n    df_with_date = df.withColumn(\n        \"TransactionDate\",\n        to_date(col(\"TransactionDate\"), \"M/d/yy\")\n    )\n    \n    print(\"\\nEsquema do DataFrame com coluna TransactionDate tratada:\")\n    df_with_date.printSchema()\n    \n    return df_with_date\n\ndef save_data(df: DataFrame, s3_output_path, spark):\n    print(\"Criando coluna de anomesdia\")\n    df = df.withColumn(\n        \"anomesdia\",\n        date_format(col(\"TransactionDate\"), \"yyyyMMdd\")\n    )\n    \n    print(f\"Salvando DataFrame em Parquet particionado por anomesdia em: {s3_output_path}\")\n    df.write \\\n      .mode('overwrite') \\\n      .partitionBy('anomesdia') \\\n      .parquet(s3_output_path)\n    print(f\"Dados salvos com sucesso em {s3_output_path} no modo overwrite.\")\n    \n    repair_query = f\"MSCK REPAIR TABLE `db_trusted`.`bank_transaction`\"\n    print(f\"Executando MSCK REPAIR TABLE: {repair_query}\")\n    \n    spark.sql(repair_query)\n    print(f\"MSCK REPAIR TABLE para `db_trusted`.`bank_transaction` concluído.\")\n\nif __name__ == \"__main__\":\n    is_bucket_empty = max_object(table_bucket, s3)\n    df = read_csv_s3(origin_bucket, spark)\n    df = transform_df(df)\n    \n    if is_bucket_empty == 1: \n        table_ddl = create_table_ddl(df)\n        create_table(table_ddl, table_bucket, spark)\n    \n    save_data(df, table_bucket, spark)\njob.commit()"
+}
